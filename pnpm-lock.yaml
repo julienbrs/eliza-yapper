@@ -718,6 +718,9 @@ importers:
 
   packages/client-twitter:
     dependencies:
+      '@elizaos/client-discord':
+        specifier: workspace:*
+        version: link:../client-discord
       '@elizaos/core':
         specifier: workspace:*
         version: link:../core

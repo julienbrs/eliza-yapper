@@ -1,8 +1,14 @@
 import { Client, elizaLogger, IAgentRuntime } from "@elizaos/core";
+import { DiscordClient } from "@elizaos/client-discord";
 import { ClientBase } from "./base.ts";
 import { validateTwitterConfig } from "./environment.ts";
 import { TwitterMonitoringClient } from "./monitoring.ts";
 import { TwitterSearchClient } from "./search.ts";
+import {
+    Message as DiscordMessage,
+    PermissionsBitField,
+    TextChannel,
+} from "discord.js";
 
 interface DiscordInterface {
     channels: {
@@ -34,13 +40,31 @@ class TwitterManager {
                 sendToDiscord: async (content: any) => {
                     elizaLogger.log(`[DEBUG] Attempting to send to Discord channel: ${discordChannelId}`);
                     try {
-                        const channel = await discordInterface.channels.fetch(discordChannelId);
+                        const discordClient = runtime.clients.discord as DiscordClient;
+                        // const discordJsClient = discordClient.client; // This is the actual discord.js `Client` instance
+                        const channelId = runtime.getSetting("DISCORD_CHANNEL_ID");
+                        const channel = await discordClient.client.channels.fetch(channelId);
+                        if (!channel?.isTextBased()) {
+                            throw new Error("Target channel is not a text-based channel!");
+                          }
                         elizaLogger.log(`[DEBUG] Successfully fetched Discord channel`);
-                        const result = await channel.send(content);
+                        const result = await (channel as TextChannel).send(content);
                         elizaLogger.log(`[DEBUG] Successfully sent message to Discord`);
                         return result;
                     } catch (error) {
-                        elizaLogger.error(`[DEBUG] Discord error:`, error);
+                        console.error("Discord send error (raw)", error);
+                        console.error("Discord send error (keys):", Object.getOwnPropertyNames(error));
+
+                        // If it's a DiscordAPIError, you might also have these properties:
+                        if ("code" in error) {
+                            console.error("Discord send error code:", error.code);
+                        }
+                        if ("status" in error) {
+                            console.error("Discord send error status:", error.status);
+                        }
+                        if ("message" in error) {
+                            console.error("Discord send error message:", error.message);
+                        }
                         throw error;
                     }
                 }
