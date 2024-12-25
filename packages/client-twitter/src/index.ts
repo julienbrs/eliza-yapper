@@ -1,54 +1,138 @@
 import { Client, elizaLogger, IAgentRuntime } from "@elizaos/core";
 import { ClientBase } from "./base.ts";
 import { validateTwitterConfig } from "./environment.ts";
-import { TwitterInteractionClient } from "./interactions.ts";
-import { TwitterPostClient } from "./post.ts";
+import { TwitterMonitoringClient } from "./monitoring.ts";
 import { TwitterSearchClient } from "./search.ts";
+
+interface DiscordInterface {
+    channels: {
+        fetch: (channelId: string) => Promise<{
+            send: (content: any) => Promise<unknown>;
+        }>;
+    };
+}
 
 class TwitterManager {
     client: ClientBase;
-    post: TwitterPostClient;
+    monitor: TwitterMonitoringClient;
     search: TwitterSearchClient;
-    interaction: TwitterInteractionClient;
-    constructor(runtime: IAgentRuntime, enableSearch: boolean) {
+
+    constructor(
+        runtime: IAgentRuntime,
+        discordInterface: DiscordInterface,
+        discordChannelId: string
+    ) {
+        elizaLogger.log(`[DEBUG] Creating TwitterManager with discordChannelId: ${discordChannelId}`);
+
         this.client = new ClientBase(runtime);
-        this.post = new TwitterPostClient(this.client, runtime);
+        elizaLogger.log(`[DEBUG] Created ClientBase`);
 
-        if (enableSearch) {
-            // this searches topics from character file
-            elizaLogger.warn("Twitter/X client running in a mode that:");
-            elizaLogger.warn("1. violates consent of random users");
-            elizaLogger.warn("2. burns your rate limit");
-            elizaLogger.warn("3. can get your account banned");
-            elizaLogger.warn("use at your own risk");
-            this.search = new TwitterSearchClient(this.client, runtime);
+        this.monitor = new TwitterMonitoringClient(
+            this.client,
+            runtime,
+            {
+                sendToDiscord: async (content: any) => {
+                    elizaLogger.log(`[DEBUG] Attempting to send to Discord channel: ${discordChannelId}`);
+                    try {
+                        const channel = await discordInterface.channels.fetch(discordChannelId);
+                        elizaLogger.log(`[DEBUG] Successfully fetched Discord channel`);
+                        const result = await channel.send(content);
+                        elizaLogger.log(`[DEBUG] Successfully sent message to Discord`);
+                        return result;
+                    } catch (error) {
+                        elizaLogger.error(`[DEBUG] Discord error:`, error);
+                        throw error;
+                    }
+                }
+            }
+        );
+        elizaLogger.log(`[DEBUG] Created TwitterMonitoringClient`);
+
+        this.search = new TwitterSearchClient(this.client, runtime);
+        elizaLogger.log(`[DEBUG] Created TwitterSearchClient`);
+    }
+
+    async init() {
+        elizaLogger.log(`[DEBUG] Initializing TwitterManager`);
+        try {
+            await this.client.init();
+            elizaLogger.log(`[DEBUG] Twitter client initialized`);
+
+            await this.monitor.start();
+            elizaLogger.log(`[DEBUG] Twitter monitor started`);
+
+        } catch (error) {
+            elizaLogger.error(`[DEBUG] Error in TwitterManager init:`, error);
+            throw error;
         }
-
-        this.interaction = new TwitterInteractionClient(this.client, runtime);
     }
 }
 
 export const TwitterClientInterface: Client = {
     async start(runtime: IAgentRuntime) {
+        elizaLogger.log(`[DEBUG] Starting Twitter client`);
+
+        // Attendre que Discord soit complètement initialisé
+        const waitForDiscord = async (attempts = 0, maxAttempts = 3): Promise<void> => {
+            if (attempts >= maxAttempts) {
+                // throw new Error("Timeout waiting for Discord initialization");
+                elizaLogger.log(`[DEBUG] Waiting for Discord client (attempt ${attempts + 1}/${maxAttempts})`);
+                return;
+            }
+
+            if (!runtime.clients?.discord) {
+                elizaLogger.log(`[DEBUG] Waiting for Discord client (attempt ${attempts + 1}/${maxAttempts})`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                return waitForDiscord(attempts + 1, maxAttempts);
+            }
+
+            // Vérifier le canal Discord
+            const discordChannelId = runtime.getSetting("DISCORD_CHANNEL_ID");
+            if (!discordChannelId) {
+                throw new Error("DISCORD_CHANNEL_ID must be set in environment");
+            }
+
+            try {
+                const discordClient = runtime.clients.discord;
+                const channel = await discordClient.channels.fetch(discordChannelId);
+                if (!channel) {
+                    throw new Error(`Discord channel ${discordChannelId} not found`);
+                }
+                elizaLogger.log(`[DEBUG] Discord channel ${discordChannelId} verified`);
+            } catch (error) {
+                elizaLogger.log(`[DEBUG] Discord channel check failed, retrying... (${attempts + 1}/${maxAttempts})`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                return waitForDiscord(attempts + 1, maxAttempts);
+            }
+        };
+
         await validateTwitterConfig(runtime);
+        elizaLogger.log(`[DEBUG] Twitter config validated`);
 
-        elizaLogger.log("Twitter client started");
+        // Attendre que Discord soit prêt
+        // await waitForDiscord();
+        elizaLogger.log(`[DEBUG] Discord client verified`);
 
-        const manager = new TwitterManager(runtime, this.enableSearch);
+        const discordChannelId = runtime.getSetting("DISCORD_CHANNEL_ID");
+        const manager = new TwitterManager(
+            runtime,
+            runtime.clients.discord as DiscordInterface,
+            discordChannelId
+        );
 
+        // Initialiser le client Twitter seulement après Discord
         await manager.client.init();
+        elizaLogger.log(`[DEBUG] Twitter client initialized`);
 
-        await manager.post.start();
-
-        await manager.interaction.start();
-
-        await manager.search?.start();
+        // Attendre 5 secondes avant de démarrer le monitor
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        await manager.monitor.start();
+        elizaLogger.log(`[DEBUG] Twitter monitor started`);
 
         return manager;
     },
+
     async stop(_runtime: IAgentRuntime) {
         elizaLogger.warn("Twitter client does not support stopping yet");
     },
 };
-
-export default TwitterClientInterface;

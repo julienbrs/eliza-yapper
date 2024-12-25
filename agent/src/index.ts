@@ -361,21 +361,44 @@ export async function initializeClients(
     character: Character,
     runtime: IAgentRuntime
 ) {
-    // each client can only register once
-    // and if we want two we can explicitly support it
-    const clients: Record<string, any> = {};
-    const clientTypes: string[] =
-        character.clients?.map((str) => str.toLowerCase()) || [];
+    runtime.clients = runtime.clients || {};
+    const clients: Record<string, any> = runtime.clients;
+    const clientTypes: string[] = character.clients?.map((str) => str.toLowerCase()) || [];
     elizaLogger.log("initializeClients", clientTypes, "for", character.name);
 
+    // Initialize Discord first if both Twitter and Discord are needed
+    if (clientTypes.includes(Clients.DISCORD)) {
+        const discordClient = await DiscordClientInterface.start(runtime);
+        if (discordClient) {
+            clients.discord = discordClient;
+            elizaLogger.log("Discord client initialized");
+        }
+    }
+    // Then initialize Twitter if needed
+    if (clientTypes.includes(Clients.TWITTER)) {
+        if (!clients.discord) {
+            elizaLogger.error("Discord client is required when using Twitter monitoring");
+            throw new Error("Discord client must be initialized before Twitter client");
+        }
+
+        try {
+            const twitterClient = await TwitterClientInterface.start(runtime);
+            if (twitterClient) {
+                clients.twitter = twitterClient;
+                elizaLogger.log("Twitter monitoring client initialized");
+            }
+        } catch (error) {
+            elizaLogger.error("Failed to initialize Twitter client:",
+                error instanceof Error ? error.message : error
+            );
+            throw error;
+        }
+    }
+
+    // Initialize other clients
     if (clientTypes.includes(Clients.DIRECT)) {
         const autoClient = await AutoClientInterface.start(runtime);
         if (autoClient) clients.auto = autoClient;
-    }
-
-    if (clientTypes.includes(Clients.DISCORD)) {
-        const discordClient = await DiscordClientInterface.start(runtime);
-        if (discordClient) clients.discord = discordClient;
     }
 
     if (clientTypes.includes(Clients.TELEGRAM)) {
@@ -383,52 +406,46 @@ export async function initializeClients(
         if (telegramClient) clients.telegram = telegramClient;
     }
 
-    if (clientTypes.includes(Clients.TWITTER)) {
-        const twitterClient = await TwitterClientInterface.start(runtime);
-
-        if (twitterClient) {
-            clients.twitter = twitterClient;
-            (twitterClient as any).enableSearch = !isFalsish(
-                getSecret(character, "TWITTER_SEARCH_ENABLE")
-            );
-        }
-    }
-
     if (clientTypes.includes(Clients.FARCASTER)) {
-        // why is this one different :(
         const farcasterClient = new FarcasterAgentClient(runtime);
         if (farcasterClient) {
-            farcasterClient.start();
+            await farcasterClient.start();
             clients.farcaster = farcasterClient;
         }
     }
+
     if (clientTypes.includes("lens")) {
         const lensClient = new LensAgentClient(runtime);
-        lensClient.start();
+        await lensClient.start();
         clients.lens = lensClient;
     }
 
-    elizaLogger.log("client keys", Object.keys(clients));
-
-    // TODO: Add Slack client to the list
-    // Initialize clients as an object
-
     if (clientTypes.includes("slack")) {
         const slackClient = await SlackClientInterface.start(runtime);
-        if (slackClient) clients.slack = slackClient; // Use object property instead of push
+        if (slackClient) clients.slack = slackClient;
     }
 
+    // Initialize plugin clients
     if (character.plugins?.length > 0) {
         for (const plugin of character.plugins) {
             if (plugin.clients) {
                 for (const client of plugin.clients) {
-                    const startedClient = await client.start(runtime);
-                    clients[client.name] = startedClient; // Assuming client has a name property
+                    try {
+                        const startedClient = await client.start(runtime);
+                        if (startedClient) {
+                            clients[client.name] = startedClient;
+                        }
+                    } catch (error) {
+                        elizaLogger.error(`Failed to initialize plugin client:`,
+                            error instanceof Error ? error.message : error
+                        );
+                    }
                 }
             }
         }
     }
 
+    elizaLogger.log("Initialized clients:", Object.keys(clients));
     return clients;
 }
 

@@ -905,23 +905,20 @@ export async function generateMessageResponse({
                 modelClass,
             });
 
-            // try parsing the response as JSON, if null then try again
-            const parsedContent = parseJSONObjectFromText(response) as Content;
-            if (!parsedContent) {
-                elizaLogger.debug("parsedContent is null, retrying");
-                continue;
-            }
+            elizaLogger.debug("[DEBUG] Raw LLM response:", response);
 
-            return parsedContent;
+            return {
+                text: response,
+            };
         } catch (error) {
             elizaLogger.error("ERROR:", error);
-            // wait for 2 seconds
             retryLength *= 2;
             await new Promise((resolve) => setTimeout(resolve, retryLength));
             elizaLogger.debug("Retrying...");
         }
     }
 }
+
 
 export const generateImage = async (
     data: {
