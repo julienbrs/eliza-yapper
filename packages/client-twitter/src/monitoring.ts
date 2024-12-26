@@ -25,7 +25,7 @@ const twitterResponseTemplate =
 
 {{providers}}
 
-# Task: Generate THREE DISTINCT possible tweet reply to this tweet. Each reply should be unique in its approach, tone, and content while matching {{agentName}}'s personality.
+# Task: Generate THREE strategically different replies to maximize engagement. First reply should be controversial yet thoughtful, second highly technical, and third flexible/adaptable. Each must encourage response through questioning or provocation while maintaining {{agentName}}'s analytical, witty persona. Never use emojis or '—'.
 
 Tweet to respond to:
 ID: {{currentPost}}
@@ -34,21 +34,26 @@ Thread Context:
 {{formattedConversation}}
 
 IMPORTANT INSTRUCTIONS:
-- Generate exactly 3 different replies in a single response
-- Each reply should be 1-2 sentences maximum
-- Each reply must be distinct in its approach
-- Label them clearly as [reply 1], [reply 2], and [reply 3]
-- Maintain {{agentName}}'s voice and character in each reply
-- Focus on engagement and relevance
-- Keep reply concise and Twitter-appropriate
+- Generate 3 distinct replies, clearly labeled
+- Format: [reply 1] controversial but intelligent
+- Format: [reply 2] deep technical analysis
+- Format: [reply 3] adaptive (tech/controversial/supportive)
+- Each reply should end with a question or provocation
+- Include relevant tickers when natural ($KAITO, $BERA, etc)
+- Keep under 240 characters
+- Maintain dry wit and technical credibility
+- Focus on triggering thoughtful responses
+- Avoid emotional or exaggerated language
 
-Generate three replies now in a single response:`;
+Your three strategic replies:"
+}`;
 
 export class TwitterMonitoringClient {
     client: ClientBase;
     runtime: IAgentRuntime;
     discordClient: DiscordJsClient;  // Actual Discord client
     isRunning: boolean = false;
+    private lastCheckedTweetIds: Record<string, bigint> = {};
 
     constructor(
         client: ClientBase,
@@ -100,32 +105,25 @@ export class TwitterMonitoringClient {
     private async monitorTargetUsers() {
         elizaLogger.log("Starting Twitter monitoring cycle");
 
-        const targetUsersStr = this.runtime.getSetting("TWITTER_TARGET_USERS");
-        if (!targetUsersStr?.trim()) {
-            elizaLogger.log("No target users configured");
-            return;
-        }
+        const targetUsersStr = this.runtime.getSetting("TWITTER_TARGET_USERS") || "";
+        const users = targetUsersStr.split(",").map((u) => u.trim()).filter(Boolean);
 
-        const TARGET_USERS = targetUsersStr
-            .split(",")
-            .map(u => u.trim())
-            .filter(u => u.length > 0);
+        elizaLogger.log("Processing target users:", users);
 
-        elizaLogger.log("Processing target users:", TARGET_USERS);
-
-        for (const username of TARGET_USERS) {
+        for (const username of users) {
             try {
-                const latestTweet = await this.fetchNewTweets(username);
-
-                if (latestTweet) {
+                const tweet = await this.fetchNewestOriginalTweet(username);
+                if (tweet) {
                     elizaLogger.log(
-                        `Processing latest tweet from ${username}:`,
-                        { id: latestTweet.id, text: latestTweet.text }
+                        `Processing latest original tweet from ${username}:`,
+                        { id: tweet.id, text: tweet.text }
                     );
 
-                    await this.processTweetForDiscord(latestTweet);
+                    await this.processTweetForDiscord(tweet);
                 } else {
-                    elizaLogger.log(`No new tweets to process for ${username}`);
+                    elizaLogger.log(
+                        `No new original tweets to process for ${username}`
+                    );
                 }
             } catch (error) {
                 elizaLogger.error(`Error processing user ${username}:`, error);
@@ -134,6 +132,78 @@ export class TwitterMonitoringClient {
 
         elizaLogger.log("Monitoring cycle completed");
     }
+
+
+/**
+ * Fetch the newest *original* (non-reply, non-retweet) tweet for a user by paging back in time
+ */
+private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> {
+    elizaLogger.log(`[DEBUG] fetchNewestOriginalTweet: Searching for an original tweet from ${username}`);
+
+    // Limit how many pages to fetch, to avoid infinite loops
+    const maxPages = 5;
+    let pageCount = 0;
+
+    // nextToken here is simply the 4th argument for pagination (type: string | undefined)
+    let nextToken: string | undefined = undefined;
+
+    while (pageCount < maxPages) {
+        // fetchSearchTweets(query, count, mode, next?) returns { tweets, next, previous }
+        // 'next' is used to fetch older tweets on subsequent calls
+        const { tweets, next, previous } = await this.client.twitterClient.fetchSearchTweets(
+            `from:${username}`,
+            10,
+            SearchMode.Latest,
+            nextToken
+        );
+
+        elizaLogger.log(`[DEBUG] Page #${pageCount + 1} of tweets for ${username}`, tweets);
+
+        // If no tweets at all, break out
+        if (!tweets || tweets.length === 0) {
+            elizaLogger.log("[DEBUG] No more tweets found, stopping.");
+            break;
+        }
+
+        // Check each tweet to see if it's "original"
+        for (const tweet of tweets) {
+            const userLastCheckedId = this.lastCheckedTweetIds[username];
+
+            // If we've already processed older/equal ID, skip
+            if (userLastCheckedId && BigInt(tweet.id) <= userLastCheckedId) {
+                elizaLogger.log(`[DEBUG] Tweet ${tweet.id} is older/processed for ${username}, skipping.`);
+                continue;
+            }
+
+            // If it's a reply or retweet, skip
+            if (tweet.isReply || tweet.isRetweet) {
+                elizaLogger.log(`[DEBUG] Tweet ${tweet.id} is reply/retweet, continuing search...`);
+                continue;
+            }
+
+            // Otherwise, we found a valid original post => return it
+            return tweet;
+        }
+
+        // If we haven't found an original tweet yet,
+        // move to the 'next' page of older tweets
+        if (next) {
+            nextToken = next;
+            pageCount++;
+        } else {
+            // No more pages
+            break;
+        }
+    }
+
+    // If we exit the loop, we did not find any original post within maxPages
+    elizaLogger.log(
+        `[DEBUG] No original (non-reply/retweet) tweet found for user ${username} within ${maxPages} pages.`
+    );
+    return null;
+}
+
+
 
     /**
      * Grab the latest tweet from a user, checking if it's new.
@@ -158,18 +228,20 @@ export class TwitterMonitoringClient {
 
         const latestTweet = userTweets[0];
 
-        // Filter if we've seen it
+        // 1) Get this user's last-checked tweet ID
+        const userLastCheckedId = this.lastCheckedTweetIds[username];
+
+        // 2) Compare to that value
         if (
-            this.client.lastCheckedTweetId &&
-            BigInt(latestTweet.id) <= this.client.lastCheckedTweetId
+            userLastCheckedId &&
+            BigInt(latestTweet.id) <= userLastCheckedId
         ) {
             elizaLogger.log(
-                `[DEBUG] Tweet ${latestTweet.id} is already processed or older`
+                `[DEBUG] Tweet ${latestTweet.id} is already processed or older for user ${username}`
             );
             return null;
         }
 
-        // Skip replies/retweets
         if (latestTweet.isReply || latestTweet.isRetweet) {
             elizaLogger.log(`[DEBUG] Tweet ${latestTweet.id} skipped: is reply or retweet`);
             return null;
@@ -267,8 +339,11 @@ export class TwitterMonitoringClient {
             }
 
             // G: Mark tweet as processed
-            this.client.lastCheckedTweetId = BigInt(tweet.id);
-            elizaLogger.log(`[DEBUG] Done handling tweet ${tweet.id}.`);
+            this.lastCheckedTweetIds[tweet.username] = BigInt(tweet.id);
+            elizaLogger.log(
+            `[DEBUG] Done handling tweet ${tweet.id} for user ${tweet.username}.
+            Updated lastCheckedTweetId to: ${tweet.id}`
+            );
         } catch (error) {
             elizaLogger.error("[DEBUG] Error in processTweetForDiscord:", error);
             throw error;
