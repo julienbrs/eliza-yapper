@@ -1,22 +1,12 @@
-import { Client, elizaLogger, IAgentRuntime } from "@elizaos/core";
+// file: client-twitter/src/index.ts
+
+import { Client as ElizaClient, elizaLogger, IAgentRuntime } from "@elizaos/core";
 import { DiscordClient } from "@elizaos/client-discord";
-import { ClientBase } from "./base.ts";
+import { Client as DiscordJsClient } from "discord.js";
 import { validateTwitterConfig } from "./environment.ts";
+import { ClientBase } from "./base.ts";
 import { TwitterMonitoringClient } from "./monitoring.ts";
 import { TwitterSearchClient } from "./search.ts";
-import {
-    Message as DiscordMessage,
-    PermissionsBitField,
-    TextChannel,
-} from "discord.js";
-
-interface DiscordInterface {
-    channels: {
-        fetch: (channelId: string) => Promise<{
-            send: (content: any) => Promise<unknown>;
-        }>;
-    };
-}
 
 class TwitterManager {
     client: ClientBase;
@@ -25,53 +15,25 @@ class TwitterManager {
 
     constructor(
         runtime: IAgentRuntime,
-        discordInterface: DiscordInterface,
+        discordJsClient: DiscordJsClient,
         discordChannelId: string
     ) {
         elizaLogger.log(`[DEBUG] Creating TwitterManager with discordChannelId: ${discordChannelId}`);
 
+        // 1) Initialize the internal Twitter base client
         this.client = new ClientBase(runtime);
         elizaLogger.log(`[DEBUG] Created ClientBase`);
 
+        // 2) Create the TwitterMonitoringClient
+        //    Pass the real discord.js client for advanced logic (threads, multiple sends, etc.)
         this.monitor = new TwitterMonitoringClient(
             this.client,
             runtime,
-            {
-                sendToDiscord: async (content: any) => {
-                    elizaLogger.log(`[DEBUG] Attempting to send to Discord channel: ${discordChannelId}`);
-                    try {
-                        const discordClient = runtime.clients.discord as DiscordClient;
-                        // const discordJsClient = discordClient.client; // This is the actual discord.js `Client` instance
-                        const channelId = runtime.getSetting("DISCORD_CHANNEL_ID");
-                        const channel = await discordClient.client.channels.fetch(channelId);
-                        if (!channel?.isTextBased()) {
-                            throw new Error("Target channel is not a text-based channel!");
-                          }
-                        elizaLogger.log(`[DEBUG] Successfully fetched Discord channel`);
-                        const result = await (channel as TextChannel).send(content);
-                        elizaLogger.log(`[DEBUG] Successfully sent message to Discord`);
-                        return result;
-                    } catch (error) {
-                        console.error("Discord send error (raw)", error);
-                        console.error("Discord send error (keys):", Object.getOwnPropertyNames(error));
-
-                        // If it's a DiscordAPIError, you might also have these properties:
-                        if ("code" in error) {
-                            console.error("Discord send error code:", error.code);
-                        }
-                        if ("status" in error) {
-                            console.error("Discord send error status:", error.status);
-                        }
-                        if ("message" in error) {
-                            console.error("Discord send error message:", error.message);
-                        }
-                        throw error;
-                    }
-                }
-            }
+            discordJsClient
         );
         elizaLogger.log(`[DEBUG] Created TwitterMonitoringClient`);
 
+        // 3) (Optional) Create the search client if needed
         this.search = new TwitterSearchClient(this.client, runtime);
         elizaLogger.log(`[DEBUG] Created TwitterSearchClient`);
     }
@@ -79,12 +41,13 @@ class TwitterManager {
     async init() {
         elizaLogger.log(`[DEBUG] Initializing TwitterManager`);
         try {
+            // 1) Initialize the Twitter base client
             await this.client.init();
             elizaLogger.log(`[DEBUG] Twitter client initialized`);
 
+            // 2) Start the monitoring loop
             await this.monitor.start();
             elizaLogger.log(`[DEBUG] Twitter monitor started`);
-
         } catch (error) {
             elizaLogger.error(`[DEBUG] Error in TwitterManager init:`, error);
             throw error;
@@ -92,66 +55,52 @@ class TwitterManager {
     }
 }
 
-export const TwitterClientInterface: Client = {
+/**
+ * The exported interface for starting/stopping the Twitter client in Eliza.
+ */
+export const TwitterClientInterface: ElizaClient = {
     async start(runtime: IAgentRuntime) {
         elizaLogger.log(`[DEBUG] Starting Twitter client`);
 
-        // Attendre que Discord soit complètement initialisé
+        // (Optional) If you want to wait for Discord to be 100% ready, you can do it here
+        // e.g. check channel access. We'll skip or comment it out for brevity:
+        /*
         const waitForDiscord = async (attempts = 0, maxAttempts = 3): Promise<void> => {
-            if (attempts >= maxAttempts) {
-                // throw new Error("Timeout waiting for Discord initialization");
-                elizaLogger.log(`[DEBUG] Waiting for Discord client (attempt ${attempts + 1}/${maxAttempts})`);
-                return;
-            }
-
-            if (!runtime.clients?.discord) {
-                elizaLogger.log(`[DEBUG] Waiting for Discord client (attempt ${attempts + 1}/${maxAttempts})`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                return waitForDiscord(attempts + 1, maxAttempts);
-            }
-
-            // Vérifier le canal Discord
-            const discordChannelId = runtime.getSetting("DISCORD_CHANNEL_ID");
-            if (!discordChannelId) {
-                throw new Error("DISCORD_CHANNEL_ID must be set in environment");
-            }
-
-            try {
-                const discordClient = runtime.clients.discord;
-                const channel = await discordClient.channels.fetch(discordChannelId);
-                if (!channel) {
-                    throw new Error(`Discord channel ${discordChannelId} not found`);
-                }
-                elizaLogger.log(`[DEBUG] Discord channel ${discordChannelId} verified`);
-            } catch (error) {
-                elizaLogger.log(`[DEBUG] Discord channel check failed, retrying... (${attempts + 1}/${maxAttempts})`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                return waitForDiscord(attempts + 1, maxAttempts);
-            }
+            // ...
         };
+        // await waitForDiscord();
+        */
 
+        // Validate your Twitter config
         await validateTwitterConfig(runtime);
         elizaLogger.log(`[DEBUG] Twitter config validated`);
 
-        // Attendre que Discord soit prêt
-        // await waitForDiscord();
-        elizaLogger.log(`[DEBUG] Discord client verified`);
-
+        // Check that DISCORD_CHANNEL_ID is set
         const discordChannelId = runtime.getSetting("DISCORD_CHANNEL_ID");
+        if (!discordChannelId) {
+            throw new Error("DISCORD_CHANNEL_ID must be set in environment");
+        }
+        elizaLogger.log(`[DEBUG] Discord client verified, channel ID = ${discordChannelId}`);
+
+        // 1) Get the actual Discord.js client from the DiscordClient
+        //    The "runtime.clients.discord" is an instance of your own `DiscordClient` class.
+        //    We want the underlying discord.js client:
+        const discordClient = runtime.clients.discord as DiscordClient;
+        const realDiscordJsClient = discordClient.client;  // The actual discord.js "Client" instance
+
+        // 2) Create the manager
         const manager = new TwitterManager(
             runtime,
-            runtime.clients.discord as DiscordInterface,
+            realDiscordJsClient,
             discordChannelId
         );
 
-        // Initialiser le client Twitter seulement après Discord
-        await manager.client.init();
-        elizaLogger.log(`[DEBUG] Twitter client initialized`);
+        // 3) Initialize the manager, which initializes the Twitter base client + monitoring
+        await manager.init();
 
-        // Attendre 5 secondes avant de démarrer le monitor
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        await manager.monitor.start();
-        elizaLogger.log(`[DEBUG] Twitter monitor started`);
+        // If you prefer to do a small delay before starting the monitor:
+        //   await new Promise(resolve => setTimeout(resolve, 5000));
+        //   await manager.monitor.start();
 
         return manager;
     },
