@@ -79,7 +79,7 @@ export class TwitterMonitoringClient {
             return;
         }
 
-        const REPLY_LIMIT = 5; // Max replies in a time window
+        const REPLY_LIMIT = 10; // Max replies in a time window
         const TIME_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
         const COOLDOWN_AFTER_TWO = 2 * 60 * 1000; // 2 minutes cooldown
 
@@ -101,10 +101,9 @@ export class TwitterMonitoringClient {
             // If we have reached the reply limit, wait until the next time window
             if (replyCount >= REPLY_LIMIT) {
                 const waitTime = Math.max(0, TIME_WINDOW_MS - (Date.now() - startTime));
-                elizaLogger.log(
-                    `[DEBUG] Reply limit reached. Waiting for ${Math.ceil(
-                        waitTime / 1000
-                    )} seconds before resuming.`
+                const nextResumeTime = new Date(Date.now() + waitTime);
+                elizaLogger.info(
+                    `[INFO] Reply limit reached. Pausing monitoring until ${nextResumeTime.toLocaleTimeString()}.`
                 );
                 await new Promise((resolve) => setTimeout(resolve, waitTime));
                 continue;
@@ -135,7 +134,10 @@ export class TwitterMonitoringClient {
 
             // Cooldown every two replies
             if (processedCount >= 2) {
-                elizaLogger.log(`[DEBUG] Cooldown: Waiting for 2 minutes after processing 2 replies.`);
+                const nextCooldownResume = new Date(Date.now() + COOLDOWN_AFTER_TWO);
+                elizaLogger.info(
+                    `[INFO] Cooldown activated: Pausing monitoring for 2 minutes. Resuming at ${nextCooldownResume.toLocaleTimeString()}.`
+                );
                 await new Promise((resolve) => setTimeout(resolve, COOLDOWN_AFTER_TWO));
                 processedCount = 0; // Reset the cooldown counter
             }
