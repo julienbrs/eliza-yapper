@@ -138,18 +138,16 @@ export class TwitterMonitoringClient {
  * Fetch the newest *original* (non-reply, non-retweet) tweet for a user by paging back in time
  */
 private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> {
-    elizaLogger.log(`[DEBUG] fetchNewestOriginalTweet: Searching for an original tweet from ${username}`);
+    elizaLogger.log(
+      `[DEBUG] fetchNewestOriginalTweet: Searching for an original tweet from ${username}`
+    );
 
-    // Limit how many pages to fetch, to avoid infinite loops
     const maxPages = 5;
     let pageCount = 0;
-
-    // nextToken here is simply the 4th argument for pagination (type: string | undefined)
     let nextToken: string | undefined = undefined;
 
     while (pageCount < maxPages) {
-        // fetchSearchTweets(query, count, mode, next?) returns { tweets, next, previous }
-        // 'next' is used to fetch older tweets on subsequent calls
+        // Retrieve up to 10 tweets from the user’s timeline
         const { tweets, next, previous } = await this.client.twitterClient.fetchSearchTweets(
             `from:${username}`,
             10,
@@ -159,96 +157,81 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
 
         elizaLogger.log(`[DEBUG] Page #${pageCount + 1} of tweets for ${username}`, tweets);
 
-        // If no tweets at all, break out
         if (!tweets || tweets.length === 0) {
             elizaLogger.log("[DEBUG] No more tweets found, stopping.");
             break;
         }
 
-        // Check each tweet to see if it's "original"
         for (const tweet of tweets) {
             const userLastCheckedId = this.lastCheckedTweetIds[username];
 
-            // If we've already processed older/equal ID, skip
+            // Skip if older/equal to last processed
             if (userLastCheckedId && BigInt(tweet.id) <= userLastCheckedId) {
-                elizaLogger.log(`[DEBUG] Tweet ${tweet.id} is older/processed for ${username}, skipping.`);
+                elizaLogger.log(
+                  `[DEBUG] Tweet ${tweet.id} is older/processed for ${username}, skipping.`
+                );
                 continue;
             }
 
-            // If it's a reply or retweet, skip
+            // Skip if it's a reply or retweet
             if (tweet.isReply || tweet.isRetweet) {
-                elizaLogger.log(`[DEBUG] Tweet ${tweet.id} is reply/retweet, continuing search...`);
+                elizaLogger.log(
+                  `[DEBUG] Tweet ${tweet.id} is a reply or retweet; continuing search...`
+                );
                 continue;
             }
 
-            // Otherwise, we found a valid original post => return it
-            return tweet;
+            // Now enforce your time + replies constraints:
+
+            // 1) Compute how old the tweet is in seconds
+            //    tweet.timestamp is presumably a Unix timestamp (seconds).
+            const nowSec = Math.floor(Date.now() / 1000);
+            const tweetAgeSec = nowSec - tweet.timestamp;
+
+            // We'll define some time limits in seconds:
+            const FIVE_MIN = 5 * 60;     // 300 sec
+            const THREE_HOURS = 3 * 3600; // 10800 sec
+
+            // 2) Check constraints:
+            //   (a) If < 5 minutes old => OK
+            //   (b) Else if < 3 hours AND replies < 15 => OK
+            //   otherwise skip
+            if (tweetAgeSec < FIVE_MIN) {
+                // Tweet is younger than 5 minutes
+                elizaLogger.log(`[DEBUG] Tweet ${tweet.id} is under 5 minutes old => ACCEPT`);
+                return tweet;
+            } else if (tweetAgeSec < THREE_HOURS && tweet.replies < 15) {
+                // Tweet is younger than 3h and has fewer than 15 replies
+                elizaLogger.log(
+                  `[DEBUG] Tweet ${tweet.id} is under 3 hours old and <15 replies => ACCEPT`
+                );
+                return tweet;
+            } else {
+                // Otherwise skip
+                elizaLogger.log(
+                  `[DEBUG] Tweet ${tweet.id} fails the time+replies constraints => SKIP`
+                );
+                continue;
+            }
         }
 
-        // If we haven't found an original tweet yet,
-        // move to the 'next' page of older tweets
+        // If we haven't returned a tweet yet in this page,
+        // move to the 'older' page (the `next` token)
         if (next) {
             nextToken = next;
             pageCount++;
         } else {
-            // No more pages
+            // no more pages
             break;
         }
     }
 
-    // If we exit the loop, we did not find any original post within maxPages
     elizaLogger.log(
-        `[DEBUG] No original (non-reply/retweet) tweet found for user ${username} within ${maxPages} pages.`
+      `[DEBUG] No acceptable original tweet found for ${username} within ${maxPages} pages.`
     );
     return null;
 }
 
-
-
-    /**
-     * Grab the latest tweet from a user, checking if it's new.
-     */
-    private async fetchNewTweets(username: string): Promise<Tweet | null> {
-        elizaLogger.log(`[DEBUG] Fetching new tweets for ${username}`);
-
-        const userTweets = (
-            await this.client.twitterClient.fetchSearchTweets(
-                `from:${username}`,
-                1,
-                SearchMode.Latest
-            )
-        ).tweets;
-
-        elizaLogger.log(`[DEBUG] Raw tweets fetched for ${username}:`, userTweets);
-
-        if (userTweets.length === 0) {
-            elizaLogger.log(`[DEBUG] No tweets found for ${username}`);
-            return null;
-        }
-
-        const latestTweet = userTweets[0];
-
-        // 1) Get this user's last-checked tweet ID
-        const userLastCheckedId = this.lastCheckedTweetIds[username];
-
-        // 2) Compare to that value
-        if (
-            userLastCheckedId &&
-            BigInt(latestTweet.id) <= userLastCheckedId
-        ) {
-            elizaLogger.log(
-                `[DEBUG] Tweet ${latestTweet.id} is already processed or older for user ${username}`
-            );
-            return null;
-        }
-
-        if (latestTweet.isReply || latestTweet.isRetweet) {
-            elizaLogger.log(`[DEBUG] Tweet ${latestTweet.id} skipped: is reply or retweet`);
-            return null;
-        }
-
-        return latestTweet;
-    }
 
     /**
      * Summarize + Generate LLM responses from the tweet

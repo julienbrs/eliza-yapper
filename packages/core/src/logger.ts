@@ -182,6 +182,11 @@ class ElizaLogger {
     }
 
     log(...strings) {
+        if (strings[0]?.startsWith("[DEBUG]") && !this.verbose) {
+            // Skip DEBUG logs unless verbose mode is active
+            return;
+        }
+
         this.#logWithStyle(strings, {
             fg: "white",
             bg: "",
