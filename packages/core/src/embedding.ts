@@ -143,15 +143,15 @@ export function getEmbeddingZeroVector(): number[] {
  */
 
 export async function embed(runtime: IAgentRuntime, input: string) {
-    elizaLogger.debug("Embedding request:", {
-        modelProvider: runtime.character.modelProvider,
-        useOpenAI: process.env.USE_OPENAI_EMBEDDING,
-        input: input?.slice(0, 50) + "...",
-        inputType: typeof input,
-        inputLength: input?.length,
-        isString: typeof input === "string",
-        isEmpty: !input,
-    });
+    // elizaLogger.debug("Embedding request:", {
+    //     modelProvider: runtime.character.modelProvider,
+    //     useOpenAI: process.env.USE_OPENAI_EMBEDDING,
+    //     input: input?.slice(0, 50) + "...",
+    //     inputType: typeof input,
+    //     inputLength: input?.length,
+    //     isString: typeof input === "string",
+    //     isEmpty: !input,
+    // });
 
     // Validate input
     if (!input || typeof input !== "string" || input.trim().length === 0) {
@@ -228,7 +228,7 @@ export async function embed(runtime: IAgentRuntime, input: string) {
     });
 
     async function getLocalEmbedding(input: string): Promise<number[]> {
-        elizaLogger.debug("DEBUG - Inside getLocalEmbedding function");
+        // elizaLogger.debug("DEBUG - Inside getLocalEmbedding function");
 
         // Check if we're in Node.js environment
         const isNode =
@@ -278,7 +278,7 @@ export async function embed(runtime: IAgentRuntime, input: string) {
                 fs.mkdirSync(cacheDir, { recursive: true });
             }
 
-            elizaLogger.debug("Initializing BGE embedding model...");
+            // elizaLogger.debug("Initializing BGE embedding model...");
 
             const embeddingModel = await FlagEmbedding.init({
                 cacheDir: cacheDir,
@@ -287,25 +287,25 @@ export async function embed(runtime: IAgentRuntime, input: string) {
                 maxLength: 512, // BGE's context window
             });
 
-            elizaLogger.debug("Generating embedding for input:", {
-                inputLength: input.length,
-                inputPreview: input.slice(0, 100) + "...",
-            });
+            // elizaLogger.debug("Generating embedding for input:", {
+            //     inputLength: input.length,
+            //     inputPreview: input.slice(0, 100) + "...",
+            // });
 
             // Let fastembed handle tokenization internally
             const embedding = await embeddingModel.queryEmbed(input);
 
             // Debug the raw embedding
-            elizaLogger.debug("Raw embedding from BGE:", {
-                type: typeof embedding,
-                isArray: Array.isArray(embedding),
-                dimensions: Array.isArray(embedding)
-                    ? embedding.length
-                    : "not an array",
-                sample: Array.isArray(embedding)
-                    ? embedding.slice(0, 5)
-                    : embedding,
-            });
+            // elizaLogger.debug("Raw embedding from BGE:", {
+            //     type: typeof embedding,
+            //     isArray: Array.isArray(embedding),
+            //     dimensions: Array.isArray(embedding)
+            //         ? embedding.length
+            //         : "not an array",
+            //     sample: Array.isArray(embedding)
+            //         ? embedding.slice(0, 5)
+            //         : embedding,
+            // });
 
             // Process the embedding into the correct format
             let finalEmbedding: number[];
@@ -332,11 +332,11 @@ export async function embed(runtime: IAgentRuntime, input: string) {
                 );
             }
 
-            elizaLogger.debug("Processed embedding:", {
-                length: finalEmbedding.length,
-                sample: finalEmbedding.slice(0, 5),
-                allNumbers: finalEmbedding.every((n) => typeof n === "number"),
-            });
+            // elizaLogger.debug("Processed embedding:", {
+            //     length: finalEmbedding.length,
+            //     sample: finalEmbedding.slice(0, 5),
+            //     allNumbers: finalEmbedding.every((n) => typeof n === "number"),
+            // });
 
             // Ensure all values are proper numbers
             finalEmbedding = finalEmbedding.map((n) => Number(n));

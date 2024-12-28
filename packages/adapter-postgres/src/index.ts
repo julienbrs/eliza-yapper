@@ -1077,6 +1077,15 @@ export class PostgresDatabaseAdapter
             tableName: string;
         }
     ): Promise<Memory[]> {
+        elizaLogger.debug("searchMemoriesByEmbedding called with:", {
+            tableName: params.tableName,
+            roomId: params.roomId,
+            match_threshold: params.match_threshold,
+            count: params.count,
+            agentId: params.agentId,
+            unique: params.unique
+          });
+
         return this.withDatabase(async () => {
             elizaLogger.debug("Incoming vector:", {
                 length: embedding.length,

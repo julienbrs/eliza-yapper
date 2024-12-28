@@ -14,9 +14,11 @@ import {  Client as DiscordJsClient, TextChannel, Message } from "discord.js";
 import { ClientBase } from "./base";
 
 // Template modifié pour générer UNE réponse unique
-const twitterResponseTemplate =
-`# Areas of Expertise
+const twitterResponseTemplate = `# Areas of Expertise
 {{knowledge}}
+
+# Retrieved Knowledge Context:
+{{relevantKnowledge}}
 
 # About {{agentName}}:
 {{bio}}
@@ -36,7 +38,7 @@ Thread Context:
 IMPORTANT INSTRUCTIONS:
 - Generate 3 distinct replies, clearly labeled
 - Format: [reply 1] controversial but intelligent
-- Format: [reply 2] deep technical analysis
+- Format: [reply 2] deep technical analysis incorporating retrieved knowledge
 - Format: [reply 3] adaptive (tech/controversial/supportive)
 - Each reply should end with a question or provocation
 - Include relevant tickers when natural ($KAITO, $BERA, etc)
@@ -44,9 +46,9 @@ IMPORTANT INSTRUCTIONS:
 - Maintain dry wit and technical credibility
 - Focus on triggering thoughtful responses
 - Avoid emotional or exaggerated language
+- Reference relevant knowledge from context when appropriate
 
-Your three strategic replies:"
-}`;
+Your three strategic replies:`;
 
 export class TwitterMonitoringClient {
     client: ClientBase;
@@ -208,7 +210,7 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
             nextToken
         );
 
-        elizaLogger.log(`[DEBUG] Page #${pageCount + 1} of tweets for ${username}`, tweets);
+        // elizaLogger.log(`[DEBUG] Page #${pageCount + 1} of tweets for ${username}`, tweets);
 
         if (!tweets || tweets.length === 0) {
             elizaLogger.log("[DEBUG] No more tweets found, stopping.");
@@ -228,9 +230,9 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
 
             // Skip if it's a reply or retweet
             if (tweet.isReply || tweet.isRetweet) {
-                elizaLogger.log(
-                  `[DEBUG] Tweet ${tweet.id} is a reply or retweet; continuing search...`
-                );
+                // elizaLogger.log(
+                //   `[DEBUG] Tweet ${tweet.id} is a reply or retweet; continuing search...`
+                // );
                 continue;
             }
 
@@ -386,6 +388,115 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
                 formattedConversation: quotedTweetContent
                     ? `Quoted Tweet: ${quotedTweetContent}\nOriginal Tweet: ${tweet.text}`
                     : tweet.text,
+                    relevantKnowledge: await (async () => {
+                        if (!tweet.text) {
+                            elizaLogger.warn("Empty tweet text, skipping knowledge retrieval");
+                            return "No tweet text provided.";
+                        }
+
+                        try {
+                            // Log the input
+                            elizaLogger.info("Creating memory for tweet:", {
+                                tweetId: tweet.id,
+                                tweetText: tweet.text,
+                                roomId: memory.roomId,
+                                agentId: this.runtime.agentId,
+                                userId: memory.userId
+                            });
+
+                            // Create memory with tweet text
+                            elizaLogger.info("USING GLOBAL KNOWLEDGE ROOM for new tweet:", {
+                                tweetId: tweet.id,
+                                finalRoomId: stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
+                              });
+                            const tweetMemory = await this.runtime.knowledgeManager.addEmbeddingToMemory({
+                                id: stringToUuid(tweet.id),
+                                content: { text: tweet.text },
+                                roomId: stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
+                                agentId: this.runtime.agentId,
+                                userId: memory.userId
+                            });
+
+                            // Log the created memory and its embedding
+                            elizaLogger.info("Memory created with embedding:", {
+                                memoryId: tweetMemory.id,
+                                hasEmbedding: !!tweetMemory.embedding,
+                                embeddingLength: tweetMemory.embedding?.length,
+                                embeddingSample: tweetMemory.embedding?.slice(0, 5)
+                            });
+
+                            if (!tweetMemory.embedding) {
+                                elizaLogger.error("No embedding generated for tweet");
+                                return "Failed to generate embedding for search.";
+                            }
+
+                            // Log search parameters
+                            elizaLogger.info("Searching memories with parameters:", {
+                                threshold: 0.1,
+                                count: 3,
+                                roomId:  stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
+                                embeddingLength: tweetMemory.embedding.length
+                            });
+                            console.log("roomId: stringToUuid(GLOBAL_KNOWLEDGE_ROOM)", stringToUuid("GLOBAL_KNOWLEDGE_ROOM"));
+
+                            const searchResults = await this.runtime.knowledgeManager.searchMemoriesByEmbedding(
+                                tweetMemory.embedding,
+                                {
+                                    match_threshold: 0.1,
+                                    count: 3,
+                                    roomId: stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
+                                    unique: true
+                                }
+                            );
+                            console.log("searchResults", searchResults);
+
+                            // Log detailed search results
+                            elizaLogger.info("Search completed:", {
+                                resultsCount: searchResults.length,
+                                results: searchResults.map(mem => ({
+                                    id: mem.id,
+                                    textPreview: mem.content.text?.slice(0, 100),
+                                    similarity: mem.similarity,
+                                    hasEmbedding: !!mem.embedding,
+                                    embeddingLength: mem.embedding?.length
+                                }))
+                            });
+
+                            // Log retrieved chunks
+                            elizaLogger.info("Retrieved knowledge chunks for tweet:", {
+                                tweetText: tweet.text,
+                                chunks: searchResults.map(mem => ({
+                                    content: mem.content.text?.slice(0, 200) + "...",
+                                    similarity: mem.similarity
+                                }))
+                            });
+
+                            if (searchResults.length === 0) {
+                                elizaLogger.info("No matches found above threshold");
+                                return "No relevant knowledge found.";
+                            }
+
+                            const knowledgeText = searchResults
+                                .map(mem => mem.content.text)
+                                .join('\n\n---\n\n');
+
+                            // Log final knowledge text length
+                            elizaLogger.info("Returning knowledge text:", {
+                                length: knowledgeText.length,
+                                chunkCount: searchResults.length
+                            });
+
+                            return knowledgeText;
+
+                        } catch (error) {
+                            elizaLogger.error("Error in knowledge retrieval:", {
+                                error,
+                                stack: error instanceof Error ? error.stack : undefined,
+                                phase: "complete process"
+                            });
+                            return "Error retrieving knowledge.";
+                        }
+                    })()
             });
 
             // Générer des réponses
