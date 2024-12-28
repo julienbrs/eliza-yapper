@@ -289,6 +289,9 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
     /**
      * Summarize + Generate LLM responses from the tweet
      */
+    /**
+     * Simule ou effectue les appels au LLM en fonction de la configuration
+     */
     private async generateMultipleResponses(state: State): Promise<string[]> {
         elizaLogger.log(`[DEBUG] Starting response generation...`);
 
@@ -299,6 +302,26 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
 
         elizaLogger.log(`[DEBUG] Generated context:`, context);
 
+        // Vérifie si les requêtes LLM doivent être désactivées
+        const enableLLMRequests = process.env.ENABLE_LLM_REQUESTS === "true";
+
+        if (!enableLLMRequests) {
+            // Simule un appel au LLM et affiche les données pour mesurer les tokens
+            const tokenEstimate = context.length; // Approximativement la longueur du contexte
+            elizaLogger.info(
+                `[SIMULATION] Context for LLM call (estimated ${tokenEstimate} tokens):`,
+                context
+            );
+
+            // Retourne des réponses simulées
+            return [
+                "[Reply 1] Simulated controversial reply.",
+                "[Reply 2] Simulated technical reply.",
+                "[Reply 3] Simulated adaptive reply.",
+            ];
+        }
+
+        // Effectue un appel réel au LLM si activé
         const response = await generateMessageResponse({
             runtime: this.runtime,
             context,
@@ -307,16 +330,16 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
 
         elizaLogger.log(`[DEBUG] Raw LLM response:`, response.text);
 
-        // Example: If you split by markers or just want one
-        // Adjust this for your own format
+        // Divise les réponses générées en fonction du format
         const responses = response.text
             .split(/\[Reply \d+\]/i)
-            .map(str => str.trim())
+            .map((str) => str.trim())
             .filter(Boolean);
 
         elizaLogger.log(`[DEBUG] Extracted responses:`, responses);
         return responses;
     }
+
 
     /**
      * Actually do the "post to Discord" + "create thread" + "send replies" steps.

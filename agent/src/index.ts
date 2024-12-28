@@ -1,5 +1,4 @@
 import { PostgresDatabaseAdapter } from "@elizaos/adapter-postgres";
-import { SqliteDatabaseAdapter } from "@elizaos/adapter-sqlite";
 import { AutoClientInterface } from "@elizaos/client-auto";
 import { DiscordClientInterface } from "@elizaos/client-discord";
 import { FarcasterAgentClient } from "@elizaos/client-farcaster";
@@ -7,6 +6,7 @@ import { LensAgentClient } from "@elizaos/client-lens";
 import { SlackClientInterface } from "@elizaos/client-slack";
 import { TelegramClientInterface } from "@elizaos/client-telegram";
 import { TwitterClientInterface } from "@elizaos/client-twitter";
+import { embed } from "@elizaos/core";
 import {
     AgentRuntime,
     CacheManager,
@@ -60,6 +60,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import yargs from "yargs";
+import { embedKnowledge } from "./generateEmbedKnowledge";
 
 const __filename = fileURLToPath(import.meta.url); // get the resolved path to the file
 const __dirname = path.dirname(__filename); // get the name of the directory
@@ -327,32 +328,29 @@ export function getTokenForProvider(
     }
 }
 
-function initializeDatabase(dataDir: string) {
+function initializeDatabase(dataDir: string): IDatabaseAdapter {
     if (process.env.POSTGRES_URL) {
         elizaLogger.info("Initializing PostgreSQL connection...");
         const db = new PostgresDatabaseAdapter({
             connectionString: process.env.POSTGRES_URL,
-            parseInputs: true,
+            max: 20, // Connection pool size
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 2000,
         });
 
         // Test the connection
         db.init()
             .then(() => {
-                elizaLogger.success(
-                    "Successfully connected to PostgreSQL database"
-                );
+                elizaLogger.success("Successfully connected to PostgreSQL database");
             })
             .catch((error) => {
                 elizaLogger.error("Failed to connect to PostgreSQL:", error);
+                throw error; // Exit if the connection fails
             });
 
         return db;
     } else {
-        const filePath =
-            process.env.SQLITE_FILE ?? path.resolve(dataDir, "db.sqlite");
-        // ":memory:";
-        const db = new SqliteDatabaseAdapter(new Database(filePath));
-        return db;
+        throw new Error("POSTGRES_URL environment variable is not set.");
     }
 }
 
@@ -675,7 +673,8 @@ async function startAgent(
             character,
             "",
             db
-        ); // "" should be replaced with dir for file system caching. THOUGHTS: might probably make this into an env
+        );
+
         const runtime: AgentRuntime = await createAgent(
             character,
             db,
@@ -683,16 +682,45 @@ async function startAgent(
             token
         );
 
-        // start services/plugins/process knowledge
+        // Start services/plugins/process knowledge
         await runtime.initialize();
 
-        // start assigned clients
+        // Optional: Embed knowledge
+        elizaLogger.info("EMBED_KNOWLEDGE is set to", process.env.EMBED_KNOWLEDGE);
+        const knowledgeDirectory = process.env.KNOWLEDGE_DIR;
+        if (!knowledgeDirectory) {
+            throw new Error("KNOWLEDGE_DIR environment variable is not set. Please define it in your .env file.");
+        }
+        elizaLogger.info(`KNOWLEDGE_DIR is set to: ${knowledgeDirectory}`);
+        if (process.env.EMBED_KNOWLEDGE === "true") {
+            const knowledgeDirectory = process.env.KNOWLEDGE_DIR;
+
+            if (!knowledgeDirectory) {
+                throw new Error(
+                    "KNOWLEDGE_DIR environment variable is not set. Please define it in your .env file."
+                );
+            }
+
+            const absoluteKnowledgeDirectory = path.resolve(knowledgeDirectory);
+
+            elizaLogger.info(
+                `Embedding knowledge from directory: ${absoluteKnowledgeDirectory}`
+            );
+
+            await embedKnowledge(runtime, db, absoluteKnowledgeDirectory);
+        }
+        else {
+            elizaLogger.info("Knowledge embedding is disabled");
+        }
+
+        // Start assigned clients
+        elizaLogger.info("starting clientss");
         runtime.clients = await initializeClients(character, runtime);
 
-        // add to container
+        // Add to container
         directClient.registerAgent(runtime);
 
-        // report to console
+        // Report to console
         elizaLogger.debug(`Started ${character.name} as ${runtime.agentId}`);
 
         return runtime;
@@ -709,10 +737,12 @@ async function startAgent(
     }
 }
 
+
 const startAgents = async () => {
     const directClient = new DirectClient();
     const serverPort = parseInt(settings.SERVER_PORT || "3000");
     const args = parseArguments();
+    elizaLogger.info("args", args);
 
     let charactersArg = args.characters || args.character;
 
@@ -721,9 +751,10 @@ const startAgents = async () => {
     if (charactersArg) {
         characters = await loadCharacters(charactersArg);
     }
-
+    elizaLogger.info("characters have  been loaded");
     try {
         for (const character of characters) {
+            elizaLogger.info("starting agent");
             await startAgent(character, directClient);
         }
     } catch (error) {
