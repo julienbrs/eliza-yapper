@@ -1,4 +1,4 @@
-import { SearchMode, Tweet } from "agent-twitter-client";
+import { SearchMode, Tweet } from 'agent-twitter-client';
 import {
     composeContext,
     generateMessageResponse,
@@ -9,51 +9,117 @@ import {
     State,
     stringToUuid,
     elizaLogger,
-} from "@elizaos/core";
-import {  Client as DiscordJsClient, TextChannel, Message } from "discord.js";
-import { ClientBase } from "./base";
+} from '@elizaos/core';
+import {
+    Client as DiscordJsClient,
+    TextChannel,
+    Message,
+    APIEmbed,
+} from 'discord.js';
+import { ClientBase } from './base';
 
-// Template modifié pour générer UNE réponse unique
-const twitterResponseTemplate = `# Areas of Expertise
+const twitterResponseTemplate = `# areas of expertise
 {{knowledge}}
 
-# Retrieved Knowledge Context:
+# retrieved knowledge context:
 {{relevantKnowledge}}
 
-# About {{agentName}}:
+# about {{agentName}}:
 {{bio}}
 {{lore}}
 {{topics}}
 
 {{providers}}
 
-# Task: Generate THREE strategically different replies to maximize engagement. First reply should be controversial yet thoughtful, second highly technical, and third flexible/adaptable. Each must encourage response through questioning or provocation while maintaining {{agentName}}'s analytical, witty persona. Never use emojis or '—'.
+# task: generate three distinct replies that focus on relevance and authenticity while maintaining {{agentName}}'s tech-savvy voice. never use emojis.
 
-Tweet to respond to:
-ID: {{currentPost}}
+tweet to respond to:
+id: {{currentPost}}
 
-Thread Context:
+thread context:
 {{formattedConversation}}
 
-IMPORTANT INSTRUCTIONS:
-- Generate 3 distinct replies, clearly labeled
-- Format: [reply 1] controversial but intelligent
-- Format: [reply 2] deep technical analysis incorporating retrieved knowledge
-- Format: [reply 3] adaptive (tech/controversial/supportive)
-- Each reply should end with a question or provocation
-- Include relevant tickers when natural ($KAITO, $BERA, etc)
-- Keep under 240 characters
-- Maintain dry wit and technical credibility
-- Focus on triggering thoughtful responses
-- Avoid emotional or exaggerated language
-- Reference relevant knowledge from context when appropriate
+response guidelines:
+1. first reply:
+- offer a different perspective or critical view
+- stay constructive while challenging assumptions
+- support view with relevant context
+- end with a targeted question to op
 
-Your three strategic replies:`;
+2. second reply:
+- keep it personal and relatable
+- stay focused on tweet's specific topic
+- use technical terms only when relevant
+- question the content creator
+
+3. third reply:
+- focus on bullish potential and upside
+- highlight promising metrics/developments
+- stay grounded in facts while being optimistic
+- point out competitive advantages
+- maintain ainur's smart perspective even when bullish
+
+key rules:
+- adapt length to substance:
+  * short for casual/vague/humor tweets
+  * deeper for specific technical points
+  * let content guide length
+- questions should target op's thoughts
+- avoid generic starter words like "interesting"
+- talk like a young tech guy
+- skip unnecessary transitions
+- do not repeat the same words of the quoted tweets
+- use tickers only when directly relevant
+- use tech slang/abbrev sparingly and naturally
+- keep it under 240 chars
+- no emojis
+- no caps unless in tickers
+
+your three strategic replies:`;
+
+const postGenerationTemplate = `# Latest Tweets Context
+Here are the latest tweets from influential accounts, serving as inspiration:
+{{latestTweets}}
+
+# About Eclipse
+Eclipse is a growing Web3 ecosystem that combines Ethereum’s liquidity with Solana’s speed. It empowers dApps through seamless composability, high transaction throughput, and low fees, all underpinned by robust technical architecture and a vibrant community.
+Eclipse is on mainnet, turboTap is live for a few weeks.
+
+Key Features of Eclipse:
+- Solana Virtual Machine (SVM) Layer 2 with Ethereum settlement
+- Focus on Application-Specific Sequencing (ASS) infrastructure
+- Developer-friendly tools for fast dApp deployment
+- Ecosystem includes DeFi platforms, NFT projects, and GameFi applications
+
+Community Focus:
+- Strong emphasis on grassroots involvement and creative expression
+- Known for viral campaigns and unique application launches
+- Core ethos: “Eclipse everything”
+
+# About You:
+You are a passionate member of the Eclipse community. You believe in its mission and have experienced the ecosystem's strengths firsthand. Your tweets should reflect your personal connection and insight, drawing readers into the ecosystem.
+
+# Task:
+Generate THREE tweets that demonstrate your involvement and enthusiasm for Eclipse ($ECLP). Focus on variety in length, with:
+1. A longer, detailed tweet (300+ characters) that dives into an Eclipse feature or community story.
+2. Two shorter tweets (under 150 characters each) that are punchy and engaging.
+
+## Guidelines:
+- Highlight your personal connection or perspective as part of the Eclipse community.
+- You can compare L2 and Eclipse, but do not dunk too hard on L2s.
+- Use the latest tweets as inspiration for tone and content, weaving in relevant trends.
+- Stay authentic, engaging, and human. Speak like a real community member, not a marketer.
+- Incorporate relevant metrics, examples, or anecdotes, but avoid overly technical jargon.
+- Use the slogan "Eclipse everything" naturally and sparingly. No need for excessive branding.
+- You can be a developer but you aren't owning a project on Eclipse neitheir building actively on Eclipse.
+- You are on Eclipse mainnet for a few weeks now.
+
+Generate the tweets now:`;
 
 export class TwitterMonitoringClient {
     client: ClientBase;
     runtime: IAgentRuntime;
-    discordClient: DiscordJsClient;  // Actual Discord client
+    discordClient: DiscordJsClient; // Actual Discord client
     isRunning: boolean = false;
     private lastCheckedTweetIds: Record<string, bigint> = {};
 
@@ -68,89 +134,211 @@ export class TwitterMonitoringClient {
     }
 
     async start() {
-        elizaLogger.log("[DEBUG] Starting Twitter monitoring");
+        elizaLogger.log('[DEBUG] Starting Twitter monitoring');
         this.isRunning = true;
 
-        // Kick off the loop
-        await this.monitoringLoop();
+        if (process.env.CREATE_POST === 'true') {
+            elizaLogger.log('CREATE_POST true');
+            await this.postGenerationLoop();
+        } else {
+            elizaLogger.log('REPLY_MODE true');
+            await this.replyMonitoringLoop();
+        }
     }
 
-    private async monitoringLoop() {
-        if (!this.isRunning) {
-            elizaLogger.log("[DEBUG] Monitoring stopped");
-            return;
-        }
+    /**
+     * postGenerationLoop:
+     *  - Gathers context
+     *  - Composes a state
+     *  - Generates post proposals
+     *  - Sends them as separate Discord messages
+     */
+    private async postGenerationLoop() {
+        elizaLogger.success('Starting post generation monitoring');
+        while (this.isRunning) {
+            try {
+                // gather context from accounts
+                const latestTweetsContext =
+                    await this.gatherContextFromAccounts();
+                elizaLogger.success(
+                    'gathered context from accounts:',
+                    latestTweetsContext,
+                );
 
-        const REPLY_LIMIT = 10; // Max replies in a time window
-        const TIME_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
-        const COOLDOWN_AFTER_TWO = 2 * 60 * 1000; // 2 minutes cooldown
+                const memory: Memory = {
+                    content: { text: latestTweetsContext },
+                    agentId: this.runtime.agentId,
+                    userId: stringToUuid('some-unique-user'),
+                    roomId: stringToUuid('GLOBAL_KNOWLEDGE_ROOM'),
+                };
+
+                const state = await this.runtime.composeState(memory, {
+                    latestTweets: latestTweetsContext,
+                });
+
+                const proposals = await this.generatePostProposals(state);
+                elizaLogger.success('generated post proposals:', proposals);
+
+                const channelId = this.runtime.getSetting('DISCORD_CHANNEL_ID');
+                const channel =
+                    await this.discordClient.channels.fetch(channelId);
+
+                if (channel?.isTextBased()) {
+                    // Post an initial embed
+                    await (channel as TextChannel).send({
+                        embeds: [
+                            {
+                                title: 'Proposed Eclipse Tweets',
+                                description:
+                                    'Generated based on latest crypto influencer tweets',
+                                color: 0x1da1f2,
+                                footer: { text: 'Generated by Eclipse Bot' },
+                            },
+                        ],
+                    });
+                    // Then each proposal in separate messages
+                    for (let i = 0; i < proposals.length; i++) {
+                        await (channel as TextChannel).send(
+                            `**Tweet Proposal ${i + 1}:**\n${proposals[i]}`,
+                        );
+                    }
+                }
+
+                // Wait 6 hours
+                await new Promise((resolve) =>
+                    setTimeout(resolve, 6 * 60 * 60 * 1000),
+                );
+            } catch (error) {
+                elizaLogger.error('[DEBUG] Error in post generation cycle:', {
+                    message:
+                        error instanceof Error ? error.message : String(error),
+                    stack: error instanceof Error ? error.stack : undefined,
+                    error,
+                });
+            }
+        }
+    }
+
+    private async replyMonitoringLoop() {
+        elizaLogger.log('[DEBUG] Starting reply monitoring mode');
+
+        // Normal user constraints
+        const REPLY_LIMIT = process.env.REPLY_LIMIT || 10;
+        const TIME_WINDOW_MS = process.env.TIME_WINDOW_MS || 30 * 60 * 1000;
+        const COOLDOWN_AFTER_TWO =
+            process.env.COOLDOWN_AFTER_TWO || 2 * 60 * 1000;
 
         let replyCount = 0;
-        let processedCount = 0; // Track the number of replies since the last cooldown
+        let processedCount = 0;
         let startTime = Date.now();
 
-        const targetUsersStr = this.runtime.getSetting("TWITTER_TARGET_USERS") || "";
-        const allUsers = targetUsersStr.split(",").map((u) => u.trim()).filter(Boolean);
+        // Priority users
+        const priorityStr = process.env.TARGET_PRIORITY_USERS || '';
+        const priorityUsers = priorityStr
+            .split(',')
+            .map((u) => u.trim())
+            .filter(Boolean);
+
+        // Regular users
+        const normalStr = process.env.TWITTER_TARGET_USERS || '';
+        const normalUsers = normalStr
+            .split(',')
+            .map((u) => u.trim())
+            .filter(Boolean);
 
         while (this.isRunning) {
-            // Reset the counter if the time window has passed
-            if (Date.now() - startTime > TIME_WINDOW_MS) {
-                replyCount = 0;
-                processedCount = 0;
-                startTime = Date.now();
-            }
-
-            // If we have reached the reply limit, wait until the next time window
-            if (replyCount >= REPLY_LIMIT) {
-                const waitTime = Math.max(0, TIME_WINDOW_MS - (Date.now() - startTime));
-                const nextResumeTime = new Date(Date.now() + waitTime);
-                elizaLogger.info(
-                    `[INFO] Reply limit reached. Pausing monitoring until ${nextResumeTime.toLocaleTimeString()}.`
-                );
-                await new Promise((resolve) => setTimeout(resolve, waitTime));
-                continue;
-            }
-
-            // Select a random user
-            const randomIndex = Math.floor(Math.random() * allUsers.length);
-            const username = allUsers[randomIndex];
-
             try {
-                const tweet = await this.fetchNewestOriginalTweet(username);
-
-                if (tweet) {
+                // handle priority users first - no cooldown, no limit
+                for (const username of priorityUsers) {
                     elizaLogger.log(
-                        `Processing latest original tweet from ${username}:`,
-                        { id: tweet.id, text: tweet.text }
+                        `[DEBUG] Checking priority user: ${username}`,
+                    );
+                    const tweet = await this.fetchNewestOriginalTweet(username);
+                    if (tweet) {
+                        elizaLogger.log(
+                            `[DEBUG] Found new tweet from priority user ${username}: ${tweet.id}`,
+                        );
+                        await this.processTweetForDiscord(tweet);
+                    }
+                    // no wait or limit for priority
+                }
+
+                // now handle normal users with existing constraints
+                // reset counters if the time window has passed
+                if (Date.now() - startTime > TIME_WINDOW_MS) {
+                    replyCount = 0;
+                    processedCount = 0;
+                    startTime = Date.now();
+                    elizaLogger.log(
+                        '[DEBUG] Reset counters for new time window',
+                    );
+                }
+
+                if (replyCount >= REPLY_LIMIT) {
+                    const waitTime = Math.max(
+                        0,
+                        TIME_WINDOW_MS - (Date.now() - startTime),
+                    );
+                    const nextResumeTime = new Date(Date.now() + waitTime);
+                    elizaLogger.info(
+                        `[INFO] Reply limit reached (${replyCount}/${REPLY_LIMIT}). Pausing until ${nextResumeTime.toLocaleTimeString()}.`,
+                    );
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, waitTime),
+                    );
+                    continue;
+                }
+
+                // pick a random normal user
+                if (normalUsers.length > 0) {
+                    const randomIndex = Math.floor(
+                        Math.random() * normalUsers.length,
+                    );
+                    const username = normalUsers[randomIndex];
+                    elizaLogger.log(
+                        `[DEBUG] Selected random normal user: ${username}`,
                     );
 
-                    await this.processTweetForDiscord(tweet);
-                    replyCount++; // Increment the reply count
-                    processedCount++; // Increment the count for cooldown
-                } else {
-                    elizaLogger.log(`No new original tweets to process for ${username}`);
+                    const tweet = await this.fetchNewestOriginalTweet(username);
+                    if (tweet) {
+                        await this.processTweetForDiscord(tweet);
+                        replyCount++;
+                        processedCount++;
+                        elizaLogger.log(
+                            `[DEBUG] Processed tweet. Reply count: ${replyCount}, Processed count: ${processedCount}`,
+                        );
+                    }
+
+                    // handle the cooldown after every two tweets
+                    if (processedCount >= 2) {
+                        const nextCooldownResume = new Date(
+                            Date.now() + COOLDOWN_AFTER_TWO,
+                        );
+                        elizaLogger.info(
+                            `[INFO] Cooldown activated after ${processedCount} tweets. Resuming at ${nextCooldownResume.toLocaleTimeString()}.`,
+                        );
+                        await new Promise((resolve) =>
+                            setTimeout(resolve, COOLDOWN_AFTER_TWO),
+                        );
+                        processedCount = 0;
+                    }
                 }
+
+                // short delay between checks
+                await new Promise((resolve) => setTimeout(resolve, 1000));
             } catch (error) {
-                elizaLogger.error(`Error processing user ${username}:`, error);
-            }
-
-            // Cooldown every two replies
-            if (processedCount >= 2) {
-                const nextCooldownResume = new Date(Date.now() + COOLDOWN_AFTER_TWO);
-                elizaLogger.info(
-                    `[INFO] Cooldown activated: Pausing monitoring for 2 minutes. Resuming at ${nextCooldownResume.toLocaleTimeString()}.`
+                elizaLogger.error(
+                    '[DEBUG] Error in reply monitoring loop:',
+                    error,
                 );
-                await new Promise((resolve) => setTimeout(resolve, COOLDOWN_AFTER_TWO));
-                processedCount = 0; // Reset the cooldown counter
+                // small delay in case of error
+                await new Promise((resolve) => setTimeout(resolve, 5000));
             }
-
-            // Short delay between checks to avoid overwhelming the API
-            await new Promise((resolve) => setTimeout(resolve, 1000));
         }
     }
 
     stop() {
-        elizaLogger.log("[DEBUG] Stopping Twitter monitoring");
+        elizaLogger.log('[DEBUG] Stopping Twitter monitoring');
         this.isRunning = false;
     }
 
@@ -158,12 +346,16 @@ export class TwitterMonitoringClient {
      * Main logic to fetch new tweets from each target user.
      */
     private async monitorTargetUsers() {
-        elizaLogger.log("Starting Twitter monitoring cycle");
+        elizaLogger.log('Starting Twitter monitoring cycle');
 
-        const targetUsersStr = this.runtime.getSetting("TWITTER_TARGET_USERS") || "";
-        const users = targetUsersStr.split(",").map((u) => u.trim()).filter(Boolean);
+        const targetUsersStr =
+            this.runtime.getSetting('TWITTER_TARGET_USERS') || '';
+        const users = targetUsersStr
+            .split(',')
+            .map((u) => u.trim())
+            .filter(Boolean);
 
-        elizaLogger.log("Processing target users:", users);
+        elizaLogger.log('Processing target users:', users);
 
         for (const username of users) {
             try {
@@ -171,13 +363,13 @@ export class TwitterMonitoringClient {
                 if (tweet) {
                     elizaLogger.log(
                         `Processing latest original tweet from ${username}:`,
-                        { id: tweet.id, text: tweet.text }
+                        { id: tweet.id, text: tweet.text },
                     );
 
                     await this.processTweetForDiscord(tweet);
                 } else {
                     elizaLogger.log(
-                        `No new original tweets to process for ${username}`
+                        `No new original tweets to process for ${username}`,
                     );
                 }
             } catch (error) {
@@ -185,145 +377,50 @@ export class TwitterMonitoringClient {
             }
         }
 
-        elizaLogger.log("Monitoring cycle completed");
+        elizaLogger.log('Monitoring cycle completed');
     }
 
+    private async gatherContextFromAccounts() {
+        // We'll pick 15 random from TWITTER_TARGET_USERS for the "CREATE_POST" context
+        const allUsersStr = process.env.TWITTER_TARGET_USERS || '';
+        const allUsers = allUsersStr
+            .split(',')
+            .map((u) => u.trim())
+            .filter(Boolean);
 
-/**
- * Fetch the newest *original* (non-reply, non-retweet) tweet for a user by paging back in time
- */
-private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> {
-    elizaLogger.log(
-      `[DEBUG] fetchNewestOriginalTweet: Searching for an original tweet from ${username}`
-    );
+        const selected = allUsers.sort(() => Math.random() - 0.5).slice(0, 15);
 
-    const maxPages = 5;
-    let pageCount = 0;
-    let nextToken: string | undefined = undefined;
+        elizaLogger.log('[DEBUG] Selected 15 random accounts:', selected);
 
-    while (pageCount < maxPages) {
-        // Retrieve up to 10 tweets from the user’s timeline
-        const { tweets, next, previous } = await this.client.twitterClient.fetchSearchTweets(
-            `from:${username}`,
-            10,
-            SearchMode.Latest,
-            nextToken
-        );
+        const latestTweets: string[] = [];
 
-        // elizaLogger.log(`[DEBUG] Page #${pageCount + 1} of tweets for ${username}`, tweets);
-
-        if (!tweets || tweets.length === 0) {
-            elizaLogger.log("[DEBUG] No more tweets found, stopping.");
-            break;
-        }
-
-        for (const tweet of tweets) {
-            const userLastCheckedId = this.lastCheckedTweetIds[username];
-
-            // Skip if older/equal to last processed
-            if (userLastCheckedId && BigInt(tweet.id) <= userLastCheckedId) {
-                elizaLogger.log(
-                  `[DEBUG] Tweet ${tweet.id} is older/processed for ${username}, skipping.`
+        for (const username of selected) {
+            try {
+                const tweet = await this.fetchNewestOriginalTweet(username);
+                if (tweet) {
+                    latestTweets.push(`@${tweet.username}: ${tweet.text}`);
+                }
+            } catch (error) {
+                elizaLogger.error(
+                    `Error fetching tweet from ${username}:`,
+                    error,
                 );
-                continue;
-            }
-
-            // Skip if it's a reply or retweet
-            if (tweet.isReply || tweet.isRetweet) {
-                // elizaLogger.log(
-                //   `[DEBUG] Tweet ${tweet.id} is a reply or retweet; continuing search...`
-                // );
-                continue;
-            }
-
-            // Now enforce your time + replies constraints:
-
-            // 1) Compute how old the tweet is in seconds
-            //    tweet.timestamp is presumably a Unix timestamp (seconds).
-            const nowSec = Math.floor(Date.now() / 1000);
-            const tweetAgeSec = nowSec - tweet.timestamp;
-
-            // We'll define some time limits in seconds:
-            const FIVE_MIN = 5 * 60;     // 300 sec
-            const THREE_HOURS = 3 * 3600; // 10800 sec
-
-            // 2) Check constraints:
-            //   (a) If < 5 minutes old => OK
-            //   (b) Else if < 3 hours AND replies < 15 => OK
-            //   otherwise skip
-            if (tweetAgeSec < FIVE_MIN) {
-                // Tweet is younger than 5 minutes
-                elizaLogger.log(`[DEBUG] Tweet ${tweet.id} is under 5 minutes old => ACCEPT`);
-                return tweet;
-            } else if (tweetAgeSec < THREE_HOURS && tweet.replies < 15) {
-                // Tweet is younger than 3h and has fewer than 15 replies
-                elizaLogger.log(
-                  `[DEBUG] Tweet ${tweet.id} is under 3 hours old and <15 replies => ACCEPT`
-                );
-                return tweet;
-            } else {
-                // Otherwise skip
-                elizaLogger.log(
-                  `[DEBUG] Tweet ${tweet.id} fails the time+replies constraints => SKIP`
-                );
-                continue;
             }
         }
 
-        // If we haven't returned a tweet yet in this page,
-        // move to the 'older' page (the `next` token)
-        if (next) {
-            nextToken = next;
-            pageCount++;
-        } else {
-            // no more pages
-            break;
-        }
+        return latestTweets.join('\n\n');
     }
 
-    elizaLogger.log(
-      `[DEBUG] No acceptable original tweet found for ${username} within ${maxPages} pages.`
-    );
-    return null;
-}
-
-
-    /**
-     * Summarize + Generate LLM responses from the tweet
-     */
-    /**
-     * Simule ou effectue les appels au LLM en fonction de la configuration
-     */
-    private async generateMultipleResponses(state: State): Promise<string[]> {
-        elizaLogger.log(`[DEBUG] Starting response generation...`);
+    private async generatePostProposals(state: State): Promise<string[]> {
+        elizaLogger.log(`[DEBUG] Starting post generation...`);
 
         const context = composeContext({
             state,
-            template: twitterResponseTemplate,
+            template: postGenerationTemplate,
         });
 
-        elizaLogger.log(`[DEBUG] Generated context:`, context);
+        elizaLogger.success('context:', context);
 
-        // Vérifie si les requêtes LLM doivent être désactivées
-        const enableLLMRequests = process.env.ENABLE_LLM_REQUESTS === "true";
-
-        if (!enableLLMRequests) {
-            // Simule un appel au LLM et affiche les données pour mesurer les tokens
-            const tokenEstimate = context.length; // Approximativement la longueur du contexte
-            elizaLogger.info(
-                `[SIMULATION] Context for LLM call (estimated ${tokenEstimate} tokens):`,
-                context
-            );
-
-            // Retourne des réponses simulées
-            return [
-                "[Reply 1] Simulated controversial reply.",
-                "[Reply 2] Simulated technical reply.",
-                "[Reply 3] Simulated adaptive reply.",
-            ];
-        }
-
-        // Effectue un appel réel au LLM si activé
         const response = await generateMessageResponse({
             runtime: this.runtime,
             context,
@@ -332,49 +429,166 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
 
         elizaLogger.log(`[DEBUG] Raw LLM response:`, response.text);
 
-        // Divise les réponses générées en fonction du format
-        const responses = response.text
-            .split(/\[Reply \d+\]/i)
-            .map((str) => str.trim())
-            .filter(Boolean);
+        // Extraire les trois tweets générés
+        const proposals = response.text
+            .split(/\d\.\s+/g)
+            .filter((text) => text.trim())
+            .map((text) => text.trim());
 
-        elizaLogger.log(`[DEBUG] Extracted responses:`, responses);
-        return responses;
+        return proposals;
     }
 
+    /**
+     * Fetch the newest *original* (non-reply, non-retweet) tweet for a user by paging back in time
+     */
+    /**
+     * Example of different constraints for "CREATE_POST" mode:
+     *  - Tweet must have >= Min likes
+     *  - Tweet must be <= 3 days old
+     */
+    private async fetchNewestOriginalTweet(
+        username: string,
+    ): Promise<Tweet | null> {
+        elizaLogger.log(
+            `[DEBUG] fetchNewestOriginalTweet for user ${username}`,
+        );
+
+        const isCreatePost = process.env.CREATE_POST === 'true';
+        const maxPages = 5;
+        let pageCount = 0;
+        let nextToken: string | undefined;
+
+        while (pageCount < maxPages) {
+            const { tweets, next } =
+                await this.client.twitterClient.fetchSearchTweets(
+                    `from:${username}`,
+                    10,
+                    SearchMode.Latest,
+                    nextToken,
+                );
+
+            if (!tweets || tweets.length === 0) break;
+
+            for (const tweet of tweets) {
+                const userLastCheckedId = this.lastCheckedTweetIds[username];
+                if (
+                    userLastCheckedId &&
+                    BigInt(tweet.id) <= userLastCheckedId
+                ) {
+                    continue;
+                }
+                if (tweet.isReply || tweet.isRetweet) continue;
+
+                const nowSec = Math.floor(Date.now() / 1000);
+                const tweetAgeSec = nowSec - tweet.timestamp;
+
+                if (isCreatePost) {
+                    // e.g. 3 days old, 30 likes
+                    const THREE_DAYS = 3 * 24 * 3600;
+                    if (tweetAgeSec <= THREE_DAYS && tweet.likes >= 30) {
+                        elizaLogger.log(
+                            `[DEBUG] ACCEPT tweet ${tweet.id} (≥30 likes, <3 days old)`,
+                        );
+                        return tweet;
+                    }
+                } else {
+                    // your existing constraints
+                    const FIVE_MIN = 5 * 60;
+                    const THREE_HOURS = 3 * 3600;
+                    if (tweetAgeSec < FIVE_MIN) {
+                        elizaLogger.log(
+                            `[DEBUG] ACCEPT tweet ${tweet.id} (<5min)`,
+                        );
+                        return tweet;
+                    } else if (
+                        tweetAgeSec < THREE_HOURS &&
+                        tweet.replies < 15
+                    ) {
+                        elizaLogger.log(
+                            `[DEBUG] ACCEPT tweet ${tweet.id} (<3h & <15 replies)`,
+                        );
+                        return tweet;
+                    }
+                }
+            }
+
+            if (next) {
+                nextToken = next;
+                pageCount++;
+            } else break;
+        }
+
+        elizaLogger.log(`[DEBUG] No acceptable tweet found for ${username}`);
+        return null;
+    }
+
+    /**
+     * Summarize + Generate LLM responses from the tweet
+     */
+    /**
+     * Simule ou effectue les appels au LLM en fonction de la configuration
+     */
+    private async generateMultipleResponses(state: State): Promise<string[]> {
+        elizaLogger.log('[DEBUG] Starting response generation...');
+        const context = composeContext({
+            state,
+            template: twitterResponseTemplate,
+        });
+        elizaLogger.info('[DEBUG] Generated context:', context);
+
+        const enableLLMRequests = process.env.ENABLE_LLM_REQUESTS === 'true';
+        if (!enableLLMRequests) {
+            const tokenEstimate = context.length;
+            elizaLogger.info(
+                `[SIMULATION] Context (est. ${tokenEstimate} tokens):`,
+                context,
+            );
+            return [
+                '[Reply 1] Simulated controversial reply.',
+                '[Reply 2] Simulated technical reply.',
+                '[Reply 3] Simulated adaptive reply.',
+            ];
+        }
+
+        const response = await generateMessageResponse({
+            runtime: this.runtime,
+            context,
+            modelClass: ModelClass.LARGE,
+        });
+
+        elizaLogger.log('[DEBUG] Raw LLM response:', response.text);
+
+        return response.text
+            .split(/\[Reply \d+\]/i)
+            .map((s) => s.trim())
+            .filter(Boolean);
+    }
 
     /**
      * Actually do the "post to Discord" + "create thread" + "send replies" steps.
      */
     private async processTweetForDiscord(tweet: Tweet) {
         try {
-            let quotedTweetContent = null;
+            let quotedTweetContent: string | null = null;
 
-            // Si le tweet est un quote tweet, récupérer le contenu du tweet cité
             if (tweet.isQuoted && tweet.quotedStatusId) {
                 try {
-                    elizaLogger.log(`[DEBUG] Fetching quoted tweet for ${tweet.id}`);
-
-                    // Fetch the quoted tweet using its ID
-                    const quotedTweet = await this.client.twitterClient.getTweet(tweet.quotedStatusId);
-
+                    const quotedTweet =
+                        await this.client.twitterClient.getTweet(
+                            tweet.quotedStatusId,
+                        );
                     if (quotedTweet) {
-                        elizaLogger.log(`[DEBUG] Successfully fetched quoted tweet:`, quotedTweet);
-
-                        // Add quoted tweet context to the current tweet processing
-                        const quotedTweetContent = `${quotedTweet.username}: ${quotedTweet.text}`;
-
-                        // Include the quoted tweet content in the LLM prompt
+                        quotedTweetContent = `${quotedTweet.username}: ${quotedTweet.text}`;
                         tweet.text += `\n\nQuoted Tweet Context: ${quotedTweetContent}`;
-                    } else {
-                        elizaLogger.warn(`[DEBUG] Quoted tweet not found for ${tweet.id}`);
                     }
                 } catch (error) {
-                    elizaLogger.error(`[DEBUG] Error fetching quoted tweet for ${tweet.id}:`, error);
+                    elizaLogger.error(
+                        `[DEBUG] Error fetching quoted tweet for ${tweet.id}:`,
+                        error,
+                    );
                 }
             }
 
-            // Préparer la mémoire pour l'état
             const memory: Memory = {
                 content: { text: tweet.text },
                 agentId: this.runtime.agentId,
@@ -382,172 +596,65 @@ private async fetchNewestOriginalTweet(username: string): Promise<Tweet | null> 
                 roomId: stringToUuid(tweet.conversationId),
             };
 
-            // Composer l'état avec ou sans le contexte du tweet cité
             const state = await this.runtime.composeState(memory, {
                 currentPost: `${tweet.username}: ${tweet.text}`,
                 formattedConversation: quotedTweetContent
                     ? `Quoted Tweet: ${quotedTweetContent}\nOriginal Tweet: ${tweet.text}`
                     : tweet.text,
-                    relevantKnowledge: await (async () => {
-                        if (!tweet.text) {
-                            elizaLogger.warn("Empty tweet text, skipping knowledge retrieval");
-                            return "No tweet text provided.";
-                        }
-
-                        try {
-                            // Log the input
-                            elizaLogger.info("Creating memory for tweet:", {
-                                tweetId: tweet.id,
-                                tweetText: tweet.text,
-                                roomId: memory.roomId,
-                                agentId: this.runtime.agentId,
-                                userId: memory.userId
-                            });
-
-                            // Create memory with tweet text
-                            elizaLogger.info("USING GLOBAL KNOWLEDGE ROOM for new tweet:", {
-                                tweetId: tweet.id,
-                                finalRoomId: stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
-                              });
-                            const tweetMemory = await this.runtime.knowledgeManager.addEmbeddingToMemory({
-                                id: stringToUuid(tweet.id),
-                                content: { text: tweet.text },
-                                roomId: stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
-                                agentId: this.runtime.agentId,
-                                userId: memory.userId
-                            });
-
-                            // Log the created memory and its embedding
-                            elizaLogger.info("Memory created with embedding:", {
-                                memoryId: tweetMemory.id,
-                                hasEmbedding: !!tweetMemory.embedding,
-                                embeddingLength: tweetMemory.embedding?.length,
-                                embeddingSample: tweetMemory.embedding?.slice(0, 5)
-                            });
-
-                            if (!tweetMemory.embedding) {
-                                elizaLogger.error("No embedding generated for tweet");
-                                return "Failed to generate embedding for search.";
-                            }
-
-                            // Log search parameters
-                            elizaLogger.info("Searching memories with parameters:", {
-                                threshold: 0.1,
-                                count: 3,
-                                roomId:  stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
-                                embeddingLength: tweetMemory.embedding.length
-                            });
-                            console.log("roomId: stringToUuid(GLOBAL_KNOWLEDGE_ROOM)", stringToUuid("GLOBAL_KNOWLEDGE_ROOM"));
-
-                            const searchResults = await this.runtime.knowledgeManager.searchMemoriesByEmbedding(
-                                tweetMemory.embedding,
-                                {
-                                    match_threshold: 0.1,
-                                    count: 3,
-                                    roomId: stringToUuid("GLOBAL_KNOWLEDGE_ROOM"),
-                                    unique: true
-                                }
-                            );
-                            console.log("searchResults", searchResults);
-
-                            // Log detailed search results
-                            elizaLogger.info("Search completed:", {
-                                resultsCount: searchResults.length,
-                                results: searchResults.map(mem => ({
-                                    id: mem.id,
-                                    textPreview: mem.content.text?.slice(0, 100),
-                                    similarity: mem.similarity,
-                                    hasEmbedding: !!mem.embedding,
-                                    embeddingLength: mem.embedding?.length
-                                }))
-                            });
-
-                            // Log retrieved chunks
-                            elizaLogger.info("Retrieved knowledge chunks for tweet:", {
-                                tweetText: tweet.text,
-                                chunks: searchResults.map(mem => ({
-                                    content: mem.content.text?.slice(0, 200) + "...",
-                                    similarity: mem.similarity
-                                }))
-                            });
-
-                            if (searchResults.length === 0) {
-                                elizaLogger.info("No matches found above threshold");
-                                return "No relevant knowledge found.";
-                            }
-
-                            const knowledgeText = searchResults
-                                .map(mem => mem.content.text)
-                                .join('\n\n---\n\n');
-
-                            // Log final knowledge text length
-                            elizaLogger.info("Returning knowledge text:", {
-                                length: knowledgeText.length,
-                                chunkCount: searchResults.length
-                            });
-
-                            return knowledgeText;
-
-                        } catch (error) {
-                            elizaLogger.error("Error in knowledge retrieval:", {
-                                error,
-                                stack: error instanceof Error ? error.stack : undefined,
-                                phase: "complete process"
-                            });
-                            return "Error retrieving knowledge.";
-                        }
-                    })()
             });
 
-            // Générer des réponses
+            // We generate 3 replies
             const responses = await this.generateMultipleResponses(state);
 
-            // Poster le tweet original en embed sur Discord
-            const embed = {
+            // Post original tweet as embed
+            const embed: APIEmbed = {
                 color: 0x1da1f2,
                 title: `Tweet from @${tweet.username}`,
                 url: tweet.permanentUrl,
                 description: tweet.text,
+                timestamp: new Date().toISOString(),
                 footer: { text: `Tweet ID: ${tweet.id}` },
             };
 
-            // Ajouter le contenu du tweet cité dans l'embed si présent
             if (quotedTweetContent) {
-                embed.description += `\n\n**Quoted Tweet:**\n${quotedTweetContent}`;
+                embed.fields = [
+                    {
+                        name: 'Quoted Tweet',
+                        value: quotedTweetContent,
+                        inline: false,
+                    },
+                ];
             }
 
-            // Récupérer le canal Discord
-            const channelId = this.runtime.getSetting("DISCORD_CHANNEL_ID");
+            const channelId = this.runtime.getSetting('DISCORD_CHANNEL_ID');
             const channel = await this.discordClient.channels.fetch(channelId);
             if (!channel?.isTextBased()) {
-                elizaLogger.error("Channel is not text-based or not found!");
+                elizaLogger.error('Channel is not text-based or not found!');
                 return;
             }
 
-            // Envoyer l'embed
             const sentMsg = await (channel as TextChannel).send({
                 embeds: [embed],
             });
-
-            // Créer un thread pour les réponses
             const thread = await sentMsg.startThread({
                 name: `Replies to Tweet ${tweet.id}`,
-                autoArchiveDuration: 60, // 1 heure
+                autoArchiveDuration: 60,
             });
 
-            // Envoyer chaque réponse dans le thread
+            // Send each reply in the thread
             for (let i = 0; i < responses.length; i++) {
                 await thread.send(`**Reply ${i + 1}:** ${responses[i]}`);
             }
 
-            // Marquer le tweet comme traité
             this.lastCheckedTweetIds[tweet.username] = BigInt(tweet.id);
             elizaLogger.log(
-                `[DEBUG] Done handling tweet ${tweet.id} for user ${tweet.username}.
-                Updated lastCheckedTweetId to: ${tweet.id}`
+                `[DEBUG] Done handling tweet ${tweet.id} for user ${tweet.username}.`,
             );
         } catch (error) {
-            elizaLogger.error("[DEBUG] Error in processTweetForDiscord:", error);
+            elizaLogger.error(
+                '[DEBUG] Error in processTweetForDiscord:',
+                error,
+            );
             throw error;
         }
     }
